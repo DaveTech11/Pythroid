@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Admin Panel</title>
+<style>
+  body{margin:0;font-family:-apple-system,system-ui,sans-serif;background:#0f1420;color:#e5ebf5}
+  .wrap{max-width:960px;margin:0 auto;padding:24px 16px}
+  h1{margin:0 0 16px;font-size:20px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:20px}
+  .stat{background:#1a2233;border-radius:10px;padding:12px}
+  .stat b{font-size:20px;display:block}
+  .stat span{font-size:11px;color:#8a94a6}
+  .row{display:flex;justify-content:space-between;align-items:center;
+    background:#1a2233;border-radius:10px;padding:12px 14px;margin-bottom:8px}
+  .row b{font-size:14px}
+  .row .meta{font-size:11px;color:#8a94a6}
+  .row a,.row button{background:#2563eb;color:#fff;border:0;border-radius:6px;
+    padding:6px 12px;font-size:12px;cursor:pointer;text-decoration:none;margin-left:6px}
+  .row button.del{background:#b91c1c}
+  .mute{background:#2563eb;border:0;color:#fff;padding:8px 14px;border-radius:8px;
+    font-size:13px;cursor:pointer;margin-bottom:16px}
+  .mute.on{background:#b91c1c}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Admin Panel</h1>
+  <button class="mute" id="mute">Mute</button>
+  <div class="stats" id="stats"></div>
+  <div id="list"></div>
+</div>
+
+<script>
+const P = new URLSearchParams(location.search).get("p") || "";
+const q = (extra="") => "?p=" + encodeURIComponent(P) + extra;
+
+async function refresh() {
+  const r = await fetch("/admin/data" + q());
+  const d = await r.json();
+  if (!d.ok) return;
+
+  const visitors = Object.values(d.visitors || {});
+  const files = visitors.flatMap(v => v.files || []);
+  const totalSize = files.reduce((a, f) => a + (f.size || 0), 0);
+  const liveCount = Object.entries(d.live || {}).filter(([_, ts]) => (Date.now()/1000) - ts < 120).length;
+
+  document.getElementById("stats").innerHTML = `
+    <div class="stat"><b>${visitors.length}</b><span>Visitors</span></div>
+    <div class="stat"><b>${files.length}</b><span>Files</span></div>
+    <div class="stat"><b>${(totalSize/(1024*1024)).toFixed(1)} MB</b><span>Total</span></div>
+    <div class="stat"><b>${liveCount}</b><span>Live now</span></div>
+  `;
+
+  const m = document.getElementById("mute");
+  m.textContent = d.mute ? "🔇 Muted (click to unmute)" : "🔔 Live (click to mute)";
+  m.classList.toggle("on", !!d.mute);
+
+  document.getElementById("list").innerHTML = visitors.map(v => `
+    <div class="row">
+      <div>
+        <b>${v.label}</b>
+        <div class="meta">${v.vid} · ${(v.files||[]).length} files</div>
+      </div>
+      <div>
+        <a href="/admin/zip${q('&vid=' + encodeURIComponent(v.vid))}">Zip</a>
+        <button class="del" data-vid="${v.vid}">Delete</button>
+      </div>
+    </div>
+  `).join("");
+
+  document.querySelectorAll(".del").forEach(b => {
+    b.onclick = async () => {
+      if (!confirm("Delete this visitor and files?")) return;
+      await fetch("/admin/delete" + q('&vid=' + encodeURIComponent(b.dataset.vid)), { method: "POST" });
+      refresh();
+    };
+  });
+}
+
+document.getElementById("mute").onclick = async () => {
+  await fetch("/admin/mute" + q(), { method: "POST" });
+  refresh();
+};
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

