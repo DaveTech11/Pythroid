@@ -20,7 +20,7 @@ os.makedirs(STORAGE, exist_ok=True)
 
 # ---------------- config ----------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8975038251:AAHSAVpptm8z-P0bAZh5zfXEUEWhnsL0BuA")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "7161177100"))
 RAW_KEY = os.environ.get("RAW_KEY", "changeme")
 WEB_PASSWORD = os.environ.get("WEB_PASSWORD", "admin")
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
